@@ -42,3 +42,14 @@ I am putting the EDF files into a folder called `local-data` which will not be
 in git. We do not want EDF files in git because they are far too large. Anything
 you put into the `local-data` directory will be ignored by git.
 
+# Installing new dependencies
+
+If you need to add new dependencies to the project, be sure to update the
+`requirements.txt` so that we can all share the same libraries and run the code.
+This can be done by updating this file using `pip freeze` and then committing it
+to git. Then each of us can use it to make sure our environments match. First,
+use `pip install` to install the new libraries, then:
+
+```bash
+pip freeze > requirements.txt
+```
