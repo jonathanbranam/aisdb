@@ -2,6 +2,8 @@ import pyedflib
 import numpy as np
 import pandas as pd
 
+import math
+
 import scipy.signal as signal
 
 from scipy.signal import hilbert
@@ -30,6 +32,15 @@ def read_edf_signals(f, signals):
         # print(f"read {i} from {signal_index}")
         sigbufs[i, :] = f.readSignal(signal_index)
     return sigbufs
+
+
+def get_edf_frequencies(f, signals):
+    indices = get_edf_signal_indices(f, signals)
+    frequencies = []
+    for label, i in zip(signals, indices):
+        i_freq = int(f.samplefrequency(i))
+        frequencies.append(i_freq)
+    return frequencies
 
 
 def read_edf_signals_file(filename, signals):
@@ -121,7 +132,8 @@ def phase_angle_method_2():
 def calc_taa(abd, chest, freq=64):
     """Calculate the time in asynchrony per second.
 
-    Result is in seconds based on the given frequency.
+    Result size depends on the stride size based on the
+    average respiratory period.
     """
     resp_period = avg_resp_period(abd, chest)
     # The length of the window was set to three times the average respiratory period.
@@ -142,6 +154,8 @@ def calc_taa(abd, chest, freq=64):
     for i in range(win_count):
         j = i * stride
         j_end = j + win_size
+        if j_end > xlen:
+          break
 
         x1b = x1[j:j_end]
         x2b = x2[j:j_end]
@@ -348,13 +362,13 @@ def chart_taa(start_time,
 
 
 def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
-                    fileroot='local-data/chat/polysomnography',
+                    base_path='local-data/chat/polysomnography',
                     ):
     ANNOT_DIR = 'annotations-events-nsrr'
     EDF_DIR = 'edfs'
 
-    edf_file = f'{fileroot}/{EDF_DIR}/{filename}.edf'
-    annot_file = f'{fileroot}/{ANNOT_DIR}/{filename}-nsrr.xml'
+    edf_file = f'{base_path}/{EDF_DIR}/{filename}.edf'
+    annot_file = f'{base_path}/{ANNOT_DIR}/{filename}-nsrr.xml'
 
     f = pyedflib.EdfReader(edf_file)
     with open(annot_file) as fp:
@@ -371,7 +385,7 @@ def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
     orig_freq = int(f.samplefrequency(edf_indices[0]))
     for label, i in zip(signal_labels, edf_indices):
         i_freq = int(f.samplefrequency(i))
-        assert orig_freq == i_freq, "Samples must have the same frequency"
+        assert orig_freq == i_freq, "Abd and chest readings must have the same frequency"
 
     print(f"{filename} sample frequency is {orig_freq}.")
 
@@ -382,15 +396,8 @@ def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
     # This will resample to 64Hz
     abd, chest = preprocess(sigs[0], sigs[1], orig_freq=orig_freq)
 
-    # taa = calc_taa(abd, chest)
-    taa, taa_valid, taa_freq = calc_taa(abd, chest)
     stages = read_sleep_stages(annot_duration, annot.scoredevents.find_all('scoredevent'))
     resp_events = read_resp_events(annot_duration, annot.scoredevents.find_all('scoredevent'))
-
-    # Sanity check the parsing
-    assert duration_sec == len(taa)
-    assert duration_sec == len(stages)
-    assert duration_sec == len(resp_events)
 
     sleep_stages = stages != 0
     awake_seconds = np.sum(stages == 0)
@@ -399,10 +406,6 @@ def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
     stage_2_seconds = np.sum(stages == 2)
     stage_3_seconds = np.sum(stages == 3)
     stage_5_seconds = np.sum(stages == 5)
-
-    # Filter taa and resp events by time asleep
-    asleep_taa = taa[sleep_stages]
-    asleep_events = resp_events[sleep_stages]
 
     # Filter sleeping taa also by resp events
     """
@@ -417,16 +420,34 @@ def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
         'Other',
     ]"""
     # Filter 1, 2, 3 Hypopnea and both apneas
-    hyp_apnea_filter = (asleep_events != 1) & (asleep_events != 2) & (asleep_events != 3)
-    #hyp_apnea_seconds = np.sum(np(hyp_apnea_filter))
-    hyp_apnea_seconds = len(hyp_apnea_filter) - np.sum(hyp_apnea_filter)
-    asleep_non_event = asleep_taa[hyp_apnea_filter]
-    asleep_non_event_seconds = len(asleep_non_event)
-
-    # Percent of time sleeping with taa over the cutoff
-    time_in_async = np.sum(asleep_non_event > taa_cutoff) / asleep_non_event_seconds
+    no_resp_events_filter = (resp_events != 1) & (resp_events != 2) & (resp_events != 3)
+    hyp_apnea_seconds = np.sum(~no_resp_events_filter)
+    
+    # Filter chest and abd signals before calculating taa
+    # because the taa calculation is not in seconds
+    
+    # keep where sleep_stages is True and no_resp_events_filter is True
+    # and expand boolean to match frequency of abd and chest
+    asleep_filter = np.repeat(sleep_stages, 64)
+    asleep_no_events_filter = np.repeat(sleep_stages & no_resp_events_filter, 64)
+    asleep_non_event_seconds = np.sum(sleep_stages & no_resp_events_filter)
+    
+    # taa = calc_taa(abd, chest)
+    asleep_non_event_taa, taa_valid, taa_freq = calc_taa(abd[asleep_no_events_filter], chest[asleep_no_events_filter])
+    asleep_taa, taa_valid_events, taa_freq_events = calc_taa(abd[asleep_filter], chest[asleep_filter])
+    
+    # Filter taa and resp events by time asleep
+    # asleep_taa = taa[sleep_stages]
+    # asleep_events = resp_events[sleep_stages]
 
     invalid_taa_time = np.sum(taa_valid != 0)
+
+    # Sanity check the parsing
+    # The taa isn't in seconds any more with the new calculation for stride length
+    # print("duration vs taa:", duration_sec, len(taa))
+    # assert duration_sec == len(taa)
+    # assert duration_sec == len(stages)
+    # assert duration_sec == len(resp_events)
 
     result = 'success'
 
@@ -440,46 +461,50 @@ def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
         result,
         orig_freq,
         duration_sec,
-        awake_seconds,
+        # awake_seconds,
         sleep_seconds,
-        stage_1_seconds,
-        stage_2_seconds,
-        stage_3_seconds,
-        stage_5_seconds,
+        # stage_1_seconds,
+        # stage_2_seconds,
+        # stage_3_seconds,
+        # stage_5_seconds,
         hyp_apnea_seconds,
         asleep_non_event_seconds,
-        np.round(time_in_async, 4),
-        np.round(np.sum(asleep_non_event > 0.25) / asleep_non_event_seconds, 4),
-        np.round(np.sum(asleep_non_event > 0.50) / asleep_non_event_seconds, 4),
-        np.round(np.sum(asleep_non_event > 0.75) / asleep_non_event_seconds, 4),
+        np.round(np.sum(asleep_non_event_taa > 0.25) / len(asleep_non_event_taa), 4),
+        np.round(np.sum(asleep_non_event_taa > 0.50) / len(asleep_non_event_taa), 4),
+        np.round(np.sum(asleep_non_event_taa > 0.75) / len(asleep_non_event_taa), 4),
+        np.round(np.sum(asleep_taa > 0.25) / len(asleep_taa), 4),
+        np.round(np.sum(asleep_taa > 0.50) / len(asleep_taa), 4),
+        np.round(np.sum(asleep_taa > 0.75) / len(asleep_taa), 4),
         invalid_taa_time,
     )
 
 
-def read_files(files):
+def read_files(files, base_path='local-data/chat/polysomnography'):
     dtypes = np.dtype([
         ('filename', np.object),
         ('comment', np.object),
         ('orig_freq', np.int64),
         ('duration_sec', np.int64),
-        ('awake_seconds', np.int64),
+        # ('awake_seconds', np.int64),
         ('sleep_seconds', np.int64),
-        ('stage_1_seconds', np.int64),
-        ('stage_2_seconds', np.int64),
-        ('stage_3_seconds', np.int64),
-        ('stage_5_seconds', np.int64),
+        # ('stage_1_seconds', np.int64),
+        # ('stage_2_seconds', np.int64),
+        # ('stage_3_seconds', np.int64),
+        # ('stage_5_seconds', np.int64),
         ('hyp_apnea_seconds', np.int64),
         ('asleep_non_event_seconds', np.int64),
-        ('time_in_async_30p', np.float64),
         ('time_in_async_25p', np.float64),
         ('time_in_async_50p', np.float64),
         ('time_in_async_75p', np.float64),
-        ('invalid_taa_time', np.int64),
+        ('time_in_async_25p_wevents', np.float64),
+        ('time_in_async_50p_wevents', np.float64),
+        ('time_in_async_75p_wevents', np.float64),
+        ('invalid_taa_periods', np.int64),
     ])
     df = np.empty(len(files), dtypes)
     for i, filename in enumerate(files):
         print(f"{i:3} processing {filename}")
-        df[i] = compute_perc_taa(filename)
+        df[i] = compute_perc_taa(filename, base_path=base_path)
     results_df = pd.DataFrame(df, index=files)
     results_df = results_df.drop(columns='filename')
     results_df.index.name = 'filename'
