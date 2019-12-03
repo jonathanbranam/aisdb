@@ -296,7 +296,8 @@ def read_resp_events(total_duration, scored_events):
             resp_type = concept[0]
             type_code = TYPE_CODE.get(resp_type, 7)
             if type_code == 7:
-                print(f"Event type{concept}")
+                # print(f"Event type{concept}")
+                pass
             start = int(float(event.start.text))
             duration = int(float(event.duration.text))
             resp_events[start:start+duration] = type_code
@@ -361,7 +362,7 @@ def chart_taa(start_time,
     plt.plot(taa_time_range, taa_valid[taa_start:taa_end], 'y')
 
 
-def compute_perc_taa(filename='baseline/chat-baseline-300004', taa_cutoff=0.3,
+def compute_perc_taa(filename='baseline/chat-baseline-300004',
                     base_path='local-data/chat/polysomnography',
                     ):
     ANNOT_DIR = 'annotations-events-nsrr'
